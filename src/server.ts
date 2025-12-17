@@ -49,8 +49,12 @@ const server = app.listen(port, async () => {
     process.exit(1);
   }
 
-  // Start the ticket watcher in the background
-  // void startTicketWatcher();
+  // Start the ticket watcher in the background (non-blocking)
+  void startTicketWatcher().catch((error) => {
+    console.error('Fatal error in ticket watcher:', error);
+    process.exit(1);
+  });
+  console.log('Ticket watcher started in background');
 });
 
 // Graceful shutdown

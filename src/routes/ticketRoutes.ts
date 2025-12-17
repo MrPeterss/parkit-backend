@@ -124,7 +124,7 @@ router.get('/street/:streetName', async (req, res, next) => {
       });
     }
 
-    res.json({
+    return res.json({
       street: lastTicket.streetLocation,
       lastTicketTime: lastTicket.timestamp,
       coordinates: {
