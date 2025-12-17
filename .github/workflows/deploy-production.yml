@@ -16,17 +16,17 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t project-showcase-backend:latest .
+          docker build -t parkit-backend:latest .
 
       - name: Deploy new container
         run: |
           # Stop and remove existing container if running
-          docker stop project-showcase-backend || true
-          docker rm project-showcase-backend || true
+          docker stop parkit-backend || true
+          docker rm parkit-backend || true
 
           # Run new container with Xvfb for non-headless Firefox
           docker run -d \
-            --name project-showcase-backend \
+            --name parkit-backend \
             --restart unless-stopped \
             --init \
             --shm-size=2g \
@@ -35,6 +35,5 @@ jobs:
             --security-opt seccomp=unconfined \
             --cap-add=SYS_ADMIN \
             -e DISPLAY=:99 \
-            -v ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PATH }}:/app/firebase-service-account.json:ro \
             -v ${{ secrets.DATABASE_PATH }}:/app/data/sqlite.db \
-            project-showcase-backend:latest
+            parkit-backend:latest
