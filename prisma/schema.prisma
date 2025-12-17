@@ -1,0 +1,24 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Ticket {
+  ticketId  String   @id
+  licensePlateNumber String?
+  licensePlateState  String?
+  lat                Float?
+  lng                Float?
+  streetLocation     String?
+  timestamp DateTime @default(now())
+}
+
+model ScraperState {
+  id            Int    @id @default(1)
+  lastCheckedId String
+  status        String
+}
