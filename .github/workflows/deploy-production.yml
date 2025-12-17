@@ -34,6 +34,7 @@ jobs:
             --env-file ${{ secrets.ENV_FILE_PATH }} \
             --security-opt seccomp=unconfined \
             --cap-add=SYS_ADMIN \
+            -e DISPLAY=:99 \
             -v ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PATH }}:/app/firebase-service-account.json:ro \
             -v ${{ secrets.DATABASE_PATH }}:/app/data/sqlite.db \
             project-showcase-backend:latest

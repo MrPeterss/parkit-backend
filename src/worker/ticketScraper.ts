@@ -1,4 +1,4 @@
-import { chromium } from 'playwright';
+import { firefox } from 'playwright';
 import type { Page } from 'playwright';
 
 import { prisma } from '../prisma.js';
@@ -250,7 +250,7 @@ export const startTicketWatcher = async (): Promise<void> => {
   const state = await getOrCreateScraperState();
   let currentTicketId = state.lastCheckedId;
 
-  const browser = await chromium.launch({
+  const browser = await firefox.launch({
     headless: false,
   });
 
