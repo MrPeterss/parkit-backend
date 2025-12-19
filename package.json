@@ -7,6 +7,7 @@
   "scripts": {
     "test:scraper": "tsx src/test-scraper.ts",
     "open:browser": "tsx src/open-browser.ts",
+    "get:tokens": "tsx src/get-tokens.ts",
     "build": "tsc",
     "start": "NODE_ENV=production node dist/server.js",
     "start:dev": "NODE_ENV=development node dist/server.js",
@@ -27,6 +28,7 @@
   },
   "homepage": "https://github.com/MrPeterss/project-showcase-backend#readme",
   "dependencies": {
+    "@2captcha/captcha-solver": "^1.3.1",
     "@prisma/client": "^6.16.2",
     "@types/multer": "^2.0.0",
     "axios": "^1.13.2",
@@ -41,6 +43,9 @@
     "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "playwright": "^1.57.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-recaptcha": "^3.6.8",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "sharp": "^0.34.5",
     "simple-git": "^3.30.0",
     "socket.io": "^4.8.1",

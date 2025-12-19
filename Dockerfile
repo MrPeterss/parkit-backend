@@ -59,6 +59,11 @@ RUN apt-get update -y && apt-get install -y \
   libasound2 \
   libatspi2.0-0 \
   libxshmfence1 \
+  # Firefox-specific dependencies
+  libxcursor1 \
+  libgtk-3-0 \
+  libgdk-pixbuf2.0-0 \
+  libcairo-gobject2 \
   # Fonts
   fonts-liberation \
   fonts-noto-color-emoji \
@@ -100,8 +105,8 @@ RUN touch /app/data/sqlite.db
 # Set display for Xvfb
 ENV DISPLAY=:99
 
-# Install Playwright browsers (Firefox)
-RUN npx playwright install firefox
+# Install Playwright browsers (Chromium with dependencies)
+RUN npx playwright install chromium --with-deps
 
 # Create startup script that runs Xvfb and the application
 RUN echo '#!/bin/sh\n\

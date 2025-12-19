@@ -67,9 +67,6 @@ NODE_ENV=development
 # Database
 DATABASE_URL="file:./prisma/data/sqlite.db"
 
-# Ticket Scraper
-START_TICKET_ID=cab0001
-
 # Optional: OCR Debug
 TESSERACT_DEBUG=false
 
@@ -77,6 +74,10 @@ TESSERACT_DEBUG=false
 PRISMA_LOG_QUERIES=true
 PRISMA_LOG_ERRORS=true
 PRISMA_LOG_WARNINGS=true
+
+# Optional: 2Captcha API Key for automatic CAPTCHA solving
+# Get your API key from: https://2captcha.com/
+TWOCAPTCHA_API_KEY=your_api_key_here
 ```
 
 ### 3. Database Setup
@@ -97,6 +98,29 @@ npx prisma studio
 ```bash
 npx playwright install chromium
 ```
+
+### 5. CAPTCHA Solving (Optional)
+
+The scraper includes automatic CAPTCHA solving using 2Captcha service. To enable:
+
+1. **Sign up for 2Captcha**: Visit [https://2captcha.com/](https://2captcha.com/) and create an account
+2. **Get API Key**: Purchase credits and copy your API key from the dashboard
+3. **Add to `.env`**: 
+   ```env
+   TWOCAPTCHA_API_KEY=your_api_key_here
+   ```
+
+**How it works:**
+- When a CAPTCHA is detected, the scraper automatically sends it to 2Captcha
+- 2Captcha workers solve the CAPTCHA (usually takes 10-30 seconds)
+- The solution is automatically submitted
+- If solving fails, the scraper falls back to reloading and retrying
+
+**Cost:** ~$2-3 per 1000 CAPTCHAs solved
+
+**Without 2Captcha:**
+- The scraper will still work but will reload and retry when CAPTCHAs appear
+- This may be slower and less reliable
 
 ## Running the Application
 

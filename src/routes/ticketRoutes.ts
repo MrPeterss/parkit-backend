@@ -52,17 +52,20 @@ router.get('/streets', async (_req, res, next) => {
         street: string;
         lat: number | null;
         lng: number | null;
+        timestamp: Date;
       }>
     >`
       SELECT DISTINCT
         ranked.streetLocation as street,
         ranked.lat,
-        ranked.lng
+        ranked.lng,
+        ranked.timestamp
       FROM (
         SELECT 
           streetLocation,
           lat,
           lng,
+          timestamp,
           ROW_NUMBER() OVER (
             PARTITION BY streetLocation 
             ORDER BY timestamp DESC
@@ -76,12 +79,13 @@ router.get('/streets', async (_req, res, next) => {
     `;
 
     // Transform to the desired JSON format
-    const result = streets.map(({ street, lat, lng }) => ({
+    const result = streets.map(({ street, lat, lng, timestamp }) => ({
       street,
       coordinates: {
         lat,
         lng,
       },
+      timestamp,
     }));
 
     res.json(result);

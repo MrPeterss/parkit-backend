@@ -24,7 +24,7 @@ jobs:
           docker stop parkit-backend || true
           docker rm parkit-backend || true
 
-          # Run new container with Xvfb for non-headless Firefox
+          # Run new container with Xvfb for non-headless Chromium with stealth
           docker run -d \
             --name parkit-backend \
             --restart unless-stopped \

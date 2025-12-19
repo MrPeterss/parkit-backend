@@ -4,6 +4,7 @@ export enum TicketSearchResult {
   ACCESSIBLE = 'accessible',
   CAPTCHA = 'captcha',
   CLOSED = 'closed',
+  FAILED_CHALLENGE = 'failed_challenge',
   NO_RESULTS = 'no_results',
 }
 
@@ -13,8 +14,8 @@ export type TicketSearchResponse = {
 };
 
 export enum TicketMessage {
-  REMITTANCE = 'No results found that match your search. However, we did locate the following associated ticket(s) that are able to be remitted today.',
-  CLOSED = "The ticket number you are searching is in a Closed - Paid Status. No further payment necessary.",
+  REMITTANCE = 'that are able to be remitted today',
+  CLOSED = "The ticket number you are searching is in a Closed",
   FAILED_CHALLENGE = "Failed Challenge. Please Try Again.",
   NO_RESULTS = "No results found that match your search"
 }
@@ -35,6 +36,9 @@ export const BACKOFF_LIST: BackoffNode = {
   backoff: Backoff.TEN_SECONDS,
   next: {
     backoff: Backoff.THIRTY_SECONDS,
-    next: null,
+    next: {
+      backoff: Backoff.ONE_MINUTE,
+      next: null,
+    },
   },
 };
