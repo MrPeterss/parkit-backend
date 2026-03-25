@@ -5,6 +5,7 @@ import type { Request, Response } from 'express';
 
 import { prisma } from './prisma.js';
 import ticketRoutes from './routes/ticketRoutes.js';
+import notificationRoutes from './routes/notificationRoutes.js';
 import { startTicketWatcher } from './worker/ticketScraper.js';
 
 const app = express();
@@ -34,6 +35,9 @@ app.get('/health', async (_: Request, res: Response) => {
 
 // Ticket routes
 app.use('/tickets', ticketRoutes);
+
+// Notification routes
+app.use('/notifications', notificationRoutes);
 
 const port = process.env.PORT || '8000';
 

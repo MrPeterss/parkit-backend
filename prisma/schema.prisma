@@ -22,3 +22,22 @@ model ScraperState {
   lastCheckedId String
   status        String
 }
+
+model FcmEnrollment {
+  id             Int      @id @default(autoincrement())
+  fcmToken       String
+  streetLocation String
+  createdAt      DateTime @default(now())
+
+  @@unique([fcmToken, streetLocation])
+}
+
+model Notification {
+  id             Int      @id @default(autoincrement())
+  fcmToken       String
+  title          String
+  body           String
+  streetLocation String
+  ticketId       String
+  sentAt         DateTime @default(now())
+}

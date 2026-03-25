@@ -1,18 +1,22 @@
 import { chromium } from 'playwright-extra';
+import stealth from 'puppeteer-extra-plugin-stealth';
 import type { Page } from 'playwright';
 import { Solver } from '@2captcha/captcha-solver';
 
+chromium.use(stealth());
+
 import { prisma } from '../prisma.js';
 import { extractGpsFromImageUrl } from '../services/ocrService.js';
+import { emitNewTicket } from '../services/notificationService.js';
 import { BACKOFF_LIST, TicketMessage, TicketSearchResult, type TicketSearchResponse } from '../tickets/types.js';
 import type { Ticket } from '@prisma/client';
 
 const solver = new Solver(process.env.TWOCAPTCHA_API_KEY ?? '');
 
+const SCRAPER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
 const TICKET_PORTAL_URL =
   'https://www.tocite.net/cityofithaca/portal/ticket' as const;
-
-const DEFAULT_START_TICKET_ID = '100000057470';
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => {
@@ -38,23 +42,33 @@ const incrementTicketId = (ticketId: string): string => {
   return `${prefix}${nextNumStr}`;
 };
 
-const getOrCreateScraperState = async () => {
-  let state = await prisma.scraperState.findUnique({
-    where: { id: 1 },
+const getNumericPart = (ticketId: string): number => {
+  const match = /(\d+)$/.exec(ticketId);
+  return match ? parseInt(match[1], 10) : 0;
+};
+
+const getStartTicketId = async (): Promise<string> => {
+  const envDefault = process.env.DEFAULT_START_TICKET_ID;
+
+  const highestTicket = await prisma.ticket.findFirst({
+    orderBy: { ticketId: 'desc' },
+    select: { ticketId: true },
   });
 
-  if (!state) {
-    state = await prisma.scraperState.create({
-      data: {
-        id: 1,
-        lastCheckedId:
-          DEFAULT_START_TICKET_ID,
-        status: 'initialized',
-      },
-    });
+  const candidates: string[] = [];
+  if (envDefault) candidates.push(envDefault);
+  if (highestTicket) candidates.push(highestTicket.ticketId);
+
+  if (candidates.length === 0) {
+    throw new Error('No DEFAULT_START_TICKET_ID env var set and no tickets in the database.');
   }
 
-  return state;
+  const best = candidates.reduce((a, b) =>
+    getNumericPart(a) >= getNumericPart(b) ? a : b
+  );
+
+  console.log(`🎯 Starting from ticket ID: ${best} (env=${envDefault ?? 'unset'}, db=${highestTicket?.ticketId ?? 'none'})`);
+  return best;
 };
 
 const updateScraperState = async (params: {
@@ -71,6 +85,8 @@ const updateScraperState = async (params: {
 };
 
 const submitTicketSearch = async (page: Page, ticketId: string) => {
+  // Wait for 1 second
+  await sleep(1000);
   // Use the correct input ID
   const inputSelector = '#ticket-number-search';
 
@@ -237,45 +253,55 @@ export const getTicketSearchResponse = async (ticketId: string, page: Page): Pro
   };
 };
 
+// Solves the CAPTCHA and calls window.validateCaptcha(token).
+// After validation, results appear automatically — no need to re-submit the search.
 const solveCaptcha = async (page: Page): Promise<boolean> => {
   try {
-    console.log('🔐 Attempting to solve CAPTCHA...');
-    const googleKey = await page.$('div.g-recaptcha');
-    const googleKeyText = await googleKey?.getAttribute('data-sitekey');
-    if (!googleKeyText) {
-      console.log('⚠️  Google key not found');
+    console.log('🔐 Solving CAPTCHA...');
+
+    const recaptchaEl = await page.$('div.g-recaptcha');
+    const googleKey = await recaptchaEl?.getAttribute('data-sitekey');
+    const captchaAction = await recaptchaEl?.getAttribute('data-action');
+
+    if (!googleKey || !captchaAction) {
+      console.log('⚠️  CAPTCHA metadata not found');
       return false;
     }
 
-    console.log('🔐 Google key found:', googleKeyText);
-
-    // submit with the google key and url
     const solution = await solver.recaptcha({
-      googlekey: googleKeyText, 
+      googlekey: googleKey,
       pageurl: page.url(),
+      action: captchaAction,
+      userAgent: SCRAPER_USER_AGENT,
+      invisible: 0,
+      version: 'v2',
+      enterprise: 1,
     });
-    
+
     if (!solution) {
-      console.log('⚠️  CAPTCHA solving not available or failed');
+      console.log('⚠️  No solution returned from solver');
       return false;
     }
 
-    console.log('✅ CAPTCHA solved successfully!');
+    console.log('✅ CAPTCHA solved, submitting token...');
 
-    console.log('SOLUTION:', solution.data);
-    
-    // put the solution into the hidden textarea
-    await page.evaluate((solution) => {
-      const textarea = document.querySelector<HTMLTextAreaElement>('textarea#g-recaptcha-response');
-      if (textarea) {
-        console.log('TEXT AREA EXISTS');
-        textarea.innerHTML = solution;
+    await page.evaluate((token) => {
+      if (typeof (window as any).validateCaptcha === 'function') {
+        (window as any).validateCaptcha(token);
       }
-      (window as any).validateCaptcha(solution);
     }, solution.data);
 
-    
-    console.log('✅ CAPTCHA response injected into page');
+    // Results appear automatically after validateCaptcha — wait for them
+    try {
+      await Promise.race([
+        page.waitForSelector('div#ticket-search-messages > div.alert', { timeout: 10000 }),
+        page.waitForSelector('div#ticket-results > div.result-container', { timeout: 10000 }),
+      ]);
+      console.log('✅ Results loaded after CAPTCHA solve');
+    } catch {
+      console.log('⚠️  Timed out waiting for results after CAPTCHA solve');
+    }
+
     return true;
   } catch (error) {
     console.error('❌ Error solving CAPTCHA:', error);
@@ -284,80 +310,55 @@ const solveCaptcha = async (page: Page): Promise<boolean> => {
 };
 
 export const searchForTicket = async (page: Page, ticketId: string): Promise<TicketSearchResponse> => {
-  console.log('📝 Submitting search...');
+  console.log(`🔍 Searching for ticket: ${ticketId}`);
   await submitTicketSearch(page, ticketId);
-
   let searchResponse = await getTicketSearchResponse(ticketId, page);
 
-  // Handle CAPTCHA and FAILED_CHALLENGE - try to solve it automatically, otherwise retry
-  let captchaAttempts = 0;
-  const maxCaptchaAttempts = 5;
-  
-  while ((searchResponse.result === TicketSearchResult.CAPTCHA || searchResponse.result === TicketSearchResult.FAILED_CHALLENGE) && captchaAttempts < maxCaptchaAttempts) {
-    captchaAttempts++;
-    
-    if (searchResponse.result === TicketSearchResult.FAILED_CHALLENGE) {
-      console.log(`🚫 FAILED_CHALLENGE detected (attempt ${captchaAttempts}/${maxCaptchaAttempts}), reloading...`);
-      // Reload immediately for failed challenges
-      await page.reload({ 
-        waitUntil: 'domcontentloaded',
-        timeout: 5000 
-      });
-      await page.waitForTimeout(1000);
-      
+  const maxAttempts = 5;
+  let attempts = 0;
+
+  while (attempts < maxAttempts) {
+    if (searchResponse.result === TicketSearchResult.CAPTCHA) {
+      attempts++;
+      console.log(`🤖 CAPTCHA detected (attempt ${attempts}/${maxAttempts}), solving...`);
+      await solveCaptcha(page);
+      // Results are already loaded after solveCaptcha — just read the page
+      searchResponse = await getTicketSearchResponse(ticketId, page);
+    } else if (searchResponse.result === TicketSearchResult.FAILED_CHALLENGE) {
+      attempts++;
+      console.log(`🚫 Failed challenge (attempt ${attempts}/${maxAttempts}), reloading and retrying...`);
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 5000 });
       await submitTicketSearch(page, ticketId);
       searchResponse = await getTicketSearchResponse(ticketId, page);
-      console.log(`✅ Search result after reload: ${searchResponse.result}`);
-      continue;
+    } else {
+      // Any other result (ACCESSIBLE, NO_RESULTS, CLOSED) — we're done
+      break;
     }
-    
-    console.log(`🤖 CAPTCHA detected (attempt ${captchaAttempts}/${maxCaptchaAttempts})...`);
-    
-    // Try to solve CAPTCHA automatically if 2Captcha is configured
-    if (process.env.TWOCAPTCHA_API_KEY) {
-      const solved = await solveCaptcha(page);
-      
-      if (solved) {        
-        // Try submitting the search again
-        await submitTicketSearch(page, ticketId);
-        searchResponse = await getTicketSearchResponse(ticketId, page);
-        
-        if (searchResponse.result !== TicketSearchResult.CAPTCHA && searchResponse.result !== TicketSearchResult.FAILED_CHALLENGE) {
-          console.log(`✅ Search successful after solving CAPTCHA: ${searchResponse.result}`);
-          break;
-        }
-      }
-    }
-    
-    // If CAPTCHA solving failed or not configured, reload and retry
-    console.log('🔄 Reloading page and retrying...');
-    await page.reload({ 
-      waitUntil: 'domcontentloaded',
-      timeout: 5000 
-    });
-    await page.waitForTimeout(1000);
-    
-    await submitTicketSearch(page, ticketId);
-    searchResponse = await getTicketSearchResponse(ticketId, page);
-    console.log(`✅ Search result after retry: ${searchResponse.result}`);
   }
 
-  if (captchaAttempts >= maxCaptchaAttempts && (searchResponse.result === TicketSearchResult.CAPTCHA || searchResponse.result === TicketSearchResult.FAILED_CHALLENGE)) {
-    console.log('⚠️  Max CAPTCHA/Challenge attempts reached, moving on...');
+  if (attempts >= maxAttempts) {
+    console.log('⚠️  Max attempts reached, moving on...');
   }
 
   return searchResponse;
 }
 
 export const startTicketWatcher = async (): Promise<void> => {
-  const state = await getOrCreateScraperState();
-  let currentTicketId = state.lastCheckedId;
+  let currentTicketId = await getStartTicketId();
 
   const browser = await chromium.launch({
     headless: false,
   });
 
-  const context = await browser.newContext();
+  const context = await browser.newContext({
+    userAgent: SCRAPER_USER_AGENT,
+    viewport: { width: 1280, height: 720 },
+    deviceScaleFactor: 1,
+    hasTouch: false,
+    isMobile: false,
+    locale: 'en-US',
+    timezoneId: 'America/New_York',
+  });
   
   const page = await context.newPage();
 
@@ -444,15 +445,12 @@ export const startTicketWatcher = async (): Promise<void> => {
         status: 'ok',
       });
 
-      // Only emit event if ticket timestamp is within the last 10 minutes
-      const now = new Date();
-      const tenMinutesAgo = new Date(now.getTime() - 10 * 60 * 1000);
-      
+      // Only send notifications for recent tickets
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
       if (ticket.timestamp >= tenMinutesAgo) {
-        // ticketEvents.emitNewTicket(ticket);
-        console.log('📡 Broadcasted to SSE clients');
+        void emitNewTicket(ticket);
       } else {
-        console.log(`⏱️  Ticket timestamp is older than 10 minutes, skipping SSE broadcast`);
+        console.log(`⏱️  Ticket is older than 10 minutes, skipping notification`);
       }
 
       currentTicketId = incrementTicketId(currentTicketId);
