@@ -112,10 +112,27 @@ export const emitNewTicket = async (ticket: Ticket): Promise<void> => {
     });
   }
 
-  // Remove any tokens that are no longer valid
-  const staleTokens = response.responses
-    .map((r, i) => (r.success ? null : tokens[i] ?? null))
-    .filter((t): t is string => t !== null);
+  // Log result per token and collect failures
+  const staleTokens: string[] = [];
+  response.responses.forEach((r, i) => {
+    const token = tokens[i] ?? '(unknown)';
+    if (r.success) {
+      console.log(`  ✅ [${i}] Sent to token ...${token.slice(-8)}`);
+    } else {
+      const err = r.error;
+      console.error(`  ❌ [${i}] Failed for token ...${token.slice(-8)}`);
+      console.error(`       Code: ${err?.code ?? 'unknown'}`);
+      console.error(`       Message: ${err?.message ?? 'no message'}`);
+      if (err && 'toJSON' in err) {
+        console.error(`       Detail:`, err.toJSON());
+      }
+      // Only remove tokens that Firebase explicitly says are invalid/unregistered
+      const isStale =
+        err?.code === 'messaging/invalid-registration-token' ||
+        err?.code === 'messaging/registration-token-not-registered';
+      if (isStale && tokens[i]) staleTokens.push(tokens[i]!);
+    }
+  });
 
   if (staleTokens.length > 0) {
     console.log(`🗑️  Removing ${staleTokens.length} stale FCM token(s)`);
