@@ -9,7 +9,7 @@
     "open:browser": "tsx src/open-browser.ts",
     "get:tokens": "tsx src/get-tokens.ts",
     "build": "tsc",
-    "start": "NODE_ENV=production node dist/server.js",
+    "start": "NODE_ENV=production prisma migrate deploy && node dist/server.js",
     "start:dev": "NODE_ENV=development node dist/server.js",
     "dev": "NODE_ENV=development nodemon -x tsx src/server.ts",
     "lint": "eslint '{src,test}/**/*.ts' --fix",
