@@ -18,11 +18,12 @@ const SCRAPER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKi
 const TICKET_PORTAL_URL =
   'https://www.tocite.net/cityofithaca/portal/ticket' as const;
 
-const sleep = (ms: number) =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  }
-);
+// Sleeps for ms ± 5% to avoid predictable timing patterns
+const sleep = (ms: number) => {
+  const jitter = ms * 0.05;
+  const actual = ms + (Math.random() * 2 - 1) * jitter;
+  return new Promise<void>((resolve) => setTimeout(resolve, actual));
+};
 
 const incrementTicketId = (ticketId: string): string => {
   // Try to match pattern with optional prefix (letters) and numeric part
@@ -111,7 +112,7 @@ const submitTicketSearch = async (page: Page, ticketId: string) => {
   await page.type(inputSelector, ticketId, { delay: 50 });
   
   // Wait a moment for any JavaScript handlers
-  await page.waitForTimeout(500);
+  await sleep(500);
 
   // Find and click the search button
   const searchButtonSelector =
@@ -145,7 +146,7 @@ const submitTicketSearch = async (page: Page, ticketId: string) => {
   }
   
   // Small buffer for any final rendering
-  await page.waitForTimeout(500);
+  await sleep(500);
 };
 
 
@@ -309,6 +310,13 @@ const solveCaptcha = async (page: Page): Promise<boolean> => {
   }
 };
 
+class CaptchaExhaustedError extends Error {
+  constructor() {
+    super('CAPTCHA could not be solved after max attempts');
+    this.name = 'CaptchaExhaustedError';
+  }
+}
+
 export const searchForTicket = async (page: Page, ticketId: string): Promise<TicketSearchResponse> => {
   console.log(`🔍 Searching for ticket: ${ticketId}`);
   await submitTicketSearch(page, ticketId);
@@ -322,7 +330,6 @@ export const searchForTicket = async (page: Page, ticketId: string): Promise<Tic
       attempts++;
       console.log(`🤖 CAPTCHA detected (attempt ${attempts}/${maxAttempts}), solving...`);
       await solveCaptcha(page);
-      // Results are already loaded after solveCaptcha — just read the page
       searchResponse = await getTicketSearchResponse(ticketId, page);
     } else if (searchResponse.result === TicketSearchResult.FAILED_CHALLENGE) {
       attempts++;
@@ -331,25 +338,20 @@ export const searchForTicket = async (page: Page, ticketId: string): Promise<Tic
       await submitTicketSearch(page, ticketId);
       searchResponse = await getTicketSearchResponse(ticketId, page);
     } else {
-      // Any other result (ACCESSIBLE, NO_RESULTS, CLOSED) — we're done
       break;
     }
   }
 
   if (attempts >= maxAttempts) {
-    console.log('⚠️  Max attempts reached, moving on...');
+    throw new CaptchaExhaustedError();
   }
 
   return searchResponse;
-}
+};
 
-export const startTicketWatcher = async (): Promise<void> => {
-  let currentTicketId = await getStartTicketId();
-
-  const browser = await chromium.launch({
-    headless: false,
-  });
-
+const createPage = async (): Promise<{ browser: Awaited<ReturnType<typeof chromium.launch>>, page: Page }> => {
+  console.log('🚀 Launching browser...');
+  const browser = await chromium.launch({ headless: false });
   const context = await browser.newContext({
     userAgent: SCRAPER_USER_AGENT,
     viewport: { width: 1280, height: 720 },
@@ -359,55 +361,40 @@ export const startTicketWatcher = async (): Promise<void> => {
     locale: 'en-US',
     timezoneId: 'America/New_York',
   });
-  
   const page = await context.newPage();
 
   console.log('🌐 Navigating to ticket portal...');
-  try {
-    await page.goto(TICKET_PORTAL_URL, { 
-      waitUntil: 'domcontentloaded',
-      timeout: 5000 
-    });
-    console.log('✅ Page loaded');
-    
-    // Wait a bit for any dynamic content
-    await page.waitForTimeout(3000);
-  } catch (error) {
-    console.error('❌ Failed to load page:', error);
-    throw error;
-  }
+  await page.goto(TICKET_PORTAL_URL, { waitUntil: 'domcontentloaded', timeout: 5000 });
+  await sleep(3000);
+  console.log('✅ Browser ready');
+
+  return { browser, page };
+};
+
+export const startTicketWatcher = async (): Promise<void> => {
+  let currentTicketId = await getStartTicketId();
+  let { browser, page } = await createPage();
 
   while (true) {
     try {
-      // reload page
-      await page.reload({ 
-        waitUntil: 'domcontentloaded',
-        timeout: 5000 
-      });
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 5000 });
 
       console.log(`\n🔍 Checking ticket: ${currentTicketId}`);
-      
-      await updateScraperState({
-        status: `checking ${currentTicketId}`,
-      });
-      
+      await updateScraperState({ status: `checking ${currentTicketId}` });
+
       let backoffNode = BACKOFF_LIST;
       let foundTicket: Ticket | null = null;
 
       while (true) {
-        // find ticket (after reloading for captchas)
         const searchResponse = await searchForTicket(page, currentTicketId);
-
         console.log('SEARCH RESPONSE:', searchResponse);
 
-        // We aren't waiting for this ticket anymore if its not no results
         if (searchResponse.result !== TicketSearchResult.NO_RESULTS) {
           foundTicket = searchResponse.ticket;
           break;
         }
 
         console.log(`⏳ Waiting for ${backoffNode.backoff}ms...`);
-        // wait for the backoff node
         await sleep(backoffNode.backoff);
         if (backoffNode.next != null) {
           backoffNode = backoffNode.next;
@@ -415,37 +402,25 @@ export const startTicketWatcher = async (): Promise<void> => {
       }
 
       if (foundTicket == null) {
-        console.log('⚠️  Ticket not found, skipping...');
-        await updateScraperState({
-          status: 'no_results',
-        });
+        console.log('⚠️  Ticket not accessible, skipping...');
+        await updateScraperState({ status: 'no_results' });
         await sleep(2000);
         currentTicketId = incrementTicketId(currentTicketId);
         continue;
       }
 
-      let ticket = await prisma.ticket.findUnique({
-        where: {
-          ticketId: foundTicket.ticketId
-        }
-      });
-      
+      let ticket = await prisma.ticket.findUnique({ where: { ticketId: foundTicket.ticketId } });
+
       if (ticket) {
         console.log(`ℹ️  Ticket ${foundTicket.ticketId} already exists, skipping creation`);
       } else {
         console.log('💾 Saving to database...');
-        ticket = await prisma.ticket.create({
-          data: foundTicket,
-        });
+        ticket = await prisma.ticket.create({ data: foundTicket });
         console.log(`✅ Saved ticket: ${ticket.ticketId}`);
       }
 
-      await updateScraperState({
-        lastCheckedId: currentTicketId,
-        status: 'ok',
-      });
+      await updateScraperState({ lastCheckedId: currentTicketId, status: 'ok' });
 
-      // Only send notifications for recent tickets
       const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
       if (ticket.timestamp >= tenMinutesAgo) {
         void emitNewTicket(ticket);
@@ -455,15 +430,25 @@ export const startTicketWatcher = async (): Promise<void> => {
 
       currentTicketId = incrementTicketId(currentTicketId);
       console.log(`➡️  Next ticket: ${currentTicketId}\n`);
-
       await sleep(2000);
+
     } catch (err) {
-      // eslint-disable-next-line no-console
-      console.error('Error in ticket watcher loop:', err);
-      await updateScraperState({
-        status: 'error',
-      });
-      await sleep(5000);
+      if (err instanceof CaptchaExhaustedError) {
+        console.warn('🔄 CAPTCHA exhausted — waiting 1 minute then restarting browser...');
+        await updateScraperState({ status: 'captcha_backoff' });
+        await sleep(60000);
+
+        console.log('🔒 Closing old browser...');
+        await browser.close().catch(() => {});
+
+        ({ browser, page } = await createPage());
+        console.log(`↩️  Retrying ticket: ${currentTicketId}`);
+        // Do NOT increment currentTicketId — retry the same ticket
+      } else {
+        console.error('Error in ticket watcher loop:', err);
+        await updateScraperState({ status: 'error' });
+        await sleep(5000);
+      }
     }
   }
 };
