@@ -12,7 +12,9 @@ if (!admin.apps.length) {
   if (!serviceAccountPath) {
     console.warn('⚠️  FIREBASE_SERVICE_ACCOUNT env var not set — FCM notifications disabled');
   } else {
+    console.log(`🔑 Loading Firebase service account from: ${serviceAccountPath}`);
     const serviceAccount = JSON.parse(readFileSync(serviceAccountPath, 'utf-8'));
+    console.log(`🔑 Service account project: ${serviceAccount.project_id}, client: ${serviceAccount.client_email}`);
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
