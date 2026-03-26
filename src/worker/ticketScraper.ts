@@ -25,6 +25,65 @@ const sleep = (ms: number) => {
   return new Promise<void>((resolve) => setTimeout(resolve, actual));
 };
 
+const SCRAPER_START_HOUR = 8;
+const SCRAPER_START_MINUTE = 30;
+const SCRAPER_END_HOUR = 17;
+const SCRAPER_END_MINUTE = 30;
+const SCRAPER_TIMEZONE = 'America/New_York';
+
+// Returns ms until the next weekday 8:30 AM ET if currently outside active hours, otherwise 0.
+const msUntilActiveHours = (): number => {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: SCRAPER_TIMEZONE,
+    weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+  }).formatToParts(now);
+
+  const weekday = parts.find(p => p.type === 'weekday')!.value; // Mon, Tue, ... Sun
+  const hour = parseInt(parts.find(p => p.type === 'hour')!.value, 10);
+  const minute = parseInt(parts.find(p => p.type === 'minute')!.value, 10);
+  const totalMinutes = hour * 60 + minute;
+
+  const startMinutes = SCRAPER_START_HOUR * 60 + SCRAPER_START_MINUTE;
+  const endMinutes = SCRAPER_END_HOUR * 60 + SCRAPER_END_MINUTE;
+
+  const isWeekend = weekday === 'Sat' || weekday === 'Sun';
+  const isWithinHours = totalMinutes >= startMinutes && totalMinutes < endMinutes;
+
+  if (!isWeekend && isWithinHours) return 0;
+
+  // Calculate how many minutes until the next weekday 8:30 AM
+  let daysUntilMonday = 0;
+  if (weekday === 'Sat') daysUntilMonday = 2;
+  else if (weekday === 'Sun') daysUntilMonday = 1;
+
+  let minutesUntilStart: number;
+  if (daysUntilMonday > 0) {
+    // Weekend: wait until Monday 8:30 AM
+    minutesUntilStart = daysUntilMonday * 24 * 60 - totalMinutes + startMinutes;
+  } else {
+    // Weekday but outside hours: wait until today or tomorrow 8:30 AM
+    minutesUntilStart = totalMinutes < startMinutes
+      ? startMinutes - totalMinutes
+      : 24 * 60 - totalMinutes + startMinutes;
+  }
+
+  return minutesUntilStart * 60 * 1000;
+};
+
+const waitForActiveHours = async (): Promise<void> => {
+  const ms = msUntilActiveHours();
+  if (ms === 0) return;
+
+  const resumeAt = new Date(Date.now() + ms).toLocaleTimeString('en-US', {
+    timeZone: SCRAPER_TIMEZONE, hour: '2-digit', minute: '2-digit',
+  });
+  console.log(`😴 Outside active hours — sleeping until ${resumeAt} ET (${Math.round(ms / 60000)}m)`);
+  await updateScraperState({ status: 'sleeping' });
+  await sleep(ms);
+  console.log('⏰ Resuming scraper...');
+};
+
 const incrementTicketId = (ticketId: string): string => {
   // Try to match pattern with optional prefix (letters) and numeric part
   const match = /^([a-zA-Z]*)(\d+)$/.exec(ticketId);
@@ -377,6 +436,8 @@ export const startTicketWatcher = async (): Promise<void> => {
 
   while (true) {
     try {
+      await waitForActiveHours();
+
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 5000 });
 
       console.log(`\n🔍 Checking ticket: ${currentTicketId}`);
@@ -386,6 +447,8 @@ export const startTicketWatcher = async (): Promise<void> => {
       let foundTicket: Ticket | null = null;
 
       while (true) {
+        await waitForActiveHours();
+
         const searchResponse = await searchForTicket(page, currentTicketId);
         console.log('SEARCH RESPONSE:', searchResponse);
 
