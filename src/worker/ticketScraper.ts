@@ -449,8 +449,25 @@ export const startTicketWatcher = async (): Promise<void> => {
       while (true) {
         await waitForActiveHours();
 
-        const searchResponse = await searchForTicket(page, currentTicketId);
+        let searchResponse = await searchForTicket(page, currentTicketId);
         console.log('SEARCH RESPONSE:', searchResponse);
+
+        // Transient portal misses: if N returns NO_RESULTS, try N+1 and N+2 before backing off.
+        if (searchResponse.result === TicketSearchResult.NO_RESULTS) {
+          let probeId = currentTicketId;
+          for (let step = 0; step < 2; step++) {
+            probeId = incrementTicketId(probeId);
+            console.log(
+              `🔁 NO_RESULTS for ${currentTicketId} — probing neighbor ${probeId} (${step + 1}/2)`
+            );
+            const altResponse = await searchForTicket(page, probeId);
+            console.log('SEARCH RESPONSE (neighbor probe):', altResponse);
+            if (altResponse.result !== TicketSearchResult.NO_RESULTS) {
+              searchResponse = altResponse;
+              break;
+            }
+          }
+        }
 
         if (searchResponse.result !== TicketSearchResult.NO_RESULTS) {
           foundTicket = searchResponse.ticket;
@@ -482,7 +499,7 @@ export const startTicketWatcher = async (): Promise<void> => {
         console.log(`✅ Saved ticket: ${ticket.ticketId}`);
       }
 
-      await updateScraperState({ lastCheckedId: currentTicketId, status: 'ok' });
+      await updateScraperState({ lastCheckedId: foundTicket.ticketId, status: 'ok' });
 
       const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
       if (ticket.timestamp >= tenMinutesAgo) {
@@ -491,7 +508,7 @@ export const startTicketWatcher = async (): Promise<void> => {
         console.log(`⏱️  Ticket is older than 10 minutes, skipping notification`);
       }
 
-      currentTicketId = incrementTicketId(currentTicketId);
+      currentTicketId = incrementTicketId(foundTicket.ticketId);
       console.log(`➡️  Next ticket: ${currentTicketId}\n`);
       await sleep(2000);
 
