@@ -209,6 +209,38 @@ const submitTicketSearch = async (page: Page, ticketId: string) => {
 };
 
 
+// Parses a timestamp string in Eastern time (e.g. "12/15/2025 10:38 AM") and
+// returns a UTC Date. Uses Intl to detect the correct ET offset (EST -5 / EDT -4)
+// so DST transitions are handled automatically.
+const parseEasternTimestamp = (text: string): Date => {
+  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s+(AM|PM)$/i.exec(text.trim());
+  if (!match) return new Date(text);
+
+  const [, mo, da, yr, hr, mi, ampm] = match;
+  let h = parseInt(hr, 10);
+  if (ampm.toUpperCase() === 'PM' && h !== 12) h += 12;
+  else if (ampm.toUpperCase() === 'AM' && h === 12) h = 0;
+
+  // Probe the ET offset by treating the wall-clock value as UTC. This is close
+  // enough (~4-5 hours off) to correctly resolve the DST offset for all times
+  // during parking enforcement hours (8:30–17:30 ET).
+  const probe = new Date(Date.UTC(+yr, +mo - 1, +da, h, +mi));
+  const offsetStr =
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      timeZoneName: 'shortOffset',
+    })
+      .formatToParts(probe)
+      .find((p) => p.type === 'timeZoneName')?.value ?? 'GMT-5';
+
+  // offsetStr is like "GMT-5" or "GMT-4"
+  const offsetHours = parseInt(offsetStr.replace('GMT', ''), 10);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const sign = offsetHours >= 0 ? '+' : '-';
+  const iso = `${yr}-${pad(+mo)}-${pad(+da)}T${pad(h)}:${pad(+mi)}:00${sign}${pad(Math.abs(offsetHours))}:00`;
+  return new Date(iso);
+};
+
 const getTicketDetails = async (ticketId: string, page: Page): Promise<Ticket | null> => {
   // wait for card to appear
   const card = await page.$(`div.card.ticket-card[data-citationnumber='${ticketId}']`);
@@ -222,8 +254,8 @@ const getTicketDetails = async (ticketId: string, page: Page): Promise<Ticket | 
   // third element is span with the timestamp inside
   const timestamp = await cardHeader.$('span:nth-child(3)')
   const timestampText = await timestamp?.textContent();
-  // is in format "12/15/2025 10:38 AM"
-  const timestampDate = new Date(timestampText ?? '');
+  // is in format "12/15/2025 10:38 AM" — Eastern time, convert to UTC
+  const timestampDate = parseEasternTimestamp(timestampText ?? '');
 
   const ticketCardInfo = await card.$('div.ticket-card-info')
 
