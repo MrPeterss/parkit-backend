@@ -6,6 +6,7 @@ export enum ErrorCodes {
   NOT_FOUND = 'NOT_FOUND', // 404
   CONFLICT = 'CONFLICT', // 409
   TOO_MANY_REQUESTS = 'TOO_MANY_REQUESTS', // 429
+  SERVICE_UNAVAILABLE = 'SERVICE_UNAVAILABLE', // 503
 }
 
 export class AppError extends Error {
@@ -83,5 +84,14 @@ export class TooManyRequestsError extends AppError {
     data?: Record<string, unknown>,
   ) {
     super(message, 429, ErrorCodes.TOO_MANY_REQUESTS, data);
+  }
+}
+
+export class ServiceUnavailableError extends AppError {
+  constructor(
+    message: string = 'Service unavailable',
+    data?: Record<string, unknown>,
+  ) {
+    super(message, 503, ErrorCodes.SERVICE_UNAVAILABLE, data);
   }
 }

@@ -8,6 +8,7 @@ chromium.use(stealth());
 import { prisma } from '../prisma.js';
 import { extractGpsFromImageUrl } from '../services/ocrService.js';
 import { emitNewTicket } from '../services/notificationService.js';
+import { ensureStreetGeometryStored } from '../services/streetGeometryService.js';
 import { BACKOFF_LIST, TicketMessage, TicketSearchResult, type TicketSearchResponse } from '../tickets/types.js';
 import type { Ticket } from '@prisma/client';
 
@@ -532,6 +533,10 @@ export const startTicketWatcher = async (): Promise<void> => {
       }
 
       await updateScraperState({ lastCheckedId: foundTicket.ticketId, status: 'ok' });
+
+      if (foundTicket.streetLocation) {
+        void ensureStreetGeometryStored(foundTicket.streetLocation);
+      }
 
       const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
       if (ticket.timestamp >= tenMinutesAgo) {

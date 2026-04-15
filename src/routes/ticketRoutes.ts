@@ -2,6 +2,7 @@ import express from 'express';
 
 import { prisma } from '../prisma.js';
 import { getAreaOverview, getStreetInsights } from '../services/ticketInsightsService.js';
+import { getStreetGeometryResponse } from '../services/streetGeometryService.js';
 import { BadRequestError, NotFoundError } from '../utils/AppError.js';
 import { isValidIanaTimeZone } from '../utils/timezone.js';
 
@@ -40,6 +41,21 @@ router.get('/street/:streetName/insights', async (req, res, next) => {
     }
 
     return res.json(insights);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// OSM street polylines for MapKit (one row per canonical ticket street name)
+router.get('/street/:streetName/geometry', async (req, res, next) => {
+  try {
+    const { streetName } = req.params;
+    if (!streetName?.trim()) {
+      return res.status(400).json({ error: 'Street name is required' });
+    }
+
+    const geometry = await getStreetGeometryResponse(streetName);
+    return res.json(geometry);
   } catch (err) {
     return next(err);
   }

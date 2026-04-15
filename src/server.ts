@@ -10,6 +10,7 @@ import adminRoutes from './routes/adminRoutes.js';
 import authRoutes from './routes/authRoutes.js';
 import ticketRoutes from './routes/ticketRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
+import { backfillMissingStreetGeometriesOnStartup } from './services/streetGeometryService.js';
 import { startTicketWatcher } from './worker/ticketScraper.js';
 
 const app = express();
@@ -70,6 +71,10 @@ const server = app.listen(port, async () => {
     process.exit(1);
   });
   console.log('Ticket watcher started in background');
+
+  void backfillMissingStreetGeometriesOnStartup().catch((error) => {
+    console.error('Street geometry backfill failed:', error);
+  });
 });
 
 // Graceful shutdown
