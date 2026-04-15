@@ -7,6 +7,37 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum Role {
+  ADMIN
+  VIEWER
+}
+
+/// Synced from Firebase Auth on each authenticated request.
+model User {
+  id               Int               @id @default(autoincrement())
+  firebaseUid      String            @unique
+  email            String?
+  displayName      String?
+  role             Role              @default(VIEWER)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  fcmEnrollments   FcmEnrollment[]
+  notificationsLog Notification[]
+  fcmDevices       UserFcmDevice[]
+}
+
+/// Device tokens registered via POST /auth/authorize (after login).
+model UserFcmDevice {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fcmToken  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, fcmToken])
+}
+
 model Ticket {
   ticketId  String   @id
   licensePlateNumber String?
@@ -23,18 +54,22 @@ model ScraperState {
   status        String
 }
 
+/// One row per user per street per device (FCM token); multiple devices = multiple rows.
 model FcmEnrollment {
   id             Int      @id @default(autoincrement())
-  fcmToken       String
+  userId         Int
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   streetLocation String
+  fcmToken       String
   createdAt      DateTime @default(now())
 
-  @@unique([fcmToken, streetLocation])
+  @@unique([userId, streetLocation, fcmToken])
 }
 
 model Notification {
   id             Int      @id @default(autoincrement())
-  fcmToken       String
+  userId         Int
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   title          String
   body           String
   streetLocation String

@@ -3,7 +3,11 @@ import 'dotenv/config';
 import express from 'express';
 import type { Request, Response } from 'express';
 
+import { globalErrorHandler } from './middleware/errorHandler.js';
+import { requireAuth } from './middleware/auth.js';
 import { prisma } from './prisma.js';
+import adminRoutes from './routes/adminRoutes.js';
+import authRoutes from './routes/authRoutes.js';
 import ticketRoutes from './routes/ticketRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import { startTicketWatcher } from './worker/ticketScraper.js';
@@ -33,11 +37,18 @@ app.get('/health', async (_: Request, res: Response) => {
   }
 });
 
-// Ticket routes
-app.use('/tickets', ticketRoutes);
+// Auth: /auth/authorize and /auth/me verify Bearer token inside the router
+app.use('/auth', authRoutes);
 
-// Notification routes
-app.use('/notifications', notificationRoutes);
+// Everything below requires a valid Bearer token (except /health and /auth/* above)
+const protectedRoutes = express.Router();
+protectedRoutes.use(requireAuth);
+protectedRoutes.use('/admin', adminRoutes);
+protectedRoutes.use('/tickets', ticketRoutes);
+protectedRoutes.use('/notifications', notificationRoutes);
+app.use(protectedRoutes);
+
+app.use(globalErrorHandler);
 
 const port = process.env.PORT || '8000';
 

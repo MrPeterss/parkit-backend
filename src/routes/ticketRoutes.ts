@@ -1,8 +1,39 @@
 import express from 'express';
 
 import { prisma } from '../prisma.js';
+import { getAreaOverview, getStreetInsights } from '../services/ticketInsightsService.js';
+import { NotFoundError } from '../utils/AppError.js';
 
 const router = express.Router();
+
+// Area-wide stats (Stitch: map "Area Insights" card)
+router.get('/insights/overview', async (_req, res, next) => {
+  try {
+    const overview = await getAreaOverview();
+    return res.json(overview);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// Per-street analytics (Stitch: Street Insights screen) — register before /street/:streetName
+router.get('/street/:streetName/insights', async (req, res, next) => {
+  try {
+    const { streetName } = req.params;
+    if (!streetName?.trim()) {
+      return res.status(400).json({ error: 'Street name is required' });
+    }
+
+    const insights = await getStreetInsights(streetName);
+    if (!insights) {
+      throw new NotFoundError('No tickets found for this street');
+    }
+
+    return res.json(insights);
+  } catch (err) {
+    return next(err);
+  }
+});
 
 // Get all tickets
 router.get('/', async (_req, res, next) => {

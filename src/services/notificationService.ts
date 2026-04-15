@@ -27,19 +27,31 @@ const fcm = () => {
   return admin.messaging();
 };
 
-// Enroll an FCM token for a street. Safe to call multiple times (upsert).
-export const enrollForStreet = async (fcmToken: string, streetLocation: string): Promise<void> => {
+// Enroll this device for a street (idempotent for the same user+street+token).
+export const enrollForStreet = async (
+  userId: number,
+  fcmToken: string,
+  streetLocation: string,
+): Promise<void> => {
   await prisma.fcmEnrollment.upsert({
-    where: { fcmToken_streetLocation: { fcmToken, streetLocation } },
+    where: {
+      userId_streetLocation_fcmToken: { userId, streetLocation, fcmToken },
+    },
     update: {},
-    create: { fcmToken, streetLocation },
+    create: { userId, fcmToken, streetLocation },
   });
 };
 
-// Unenroll an FCM token from a street.
-export const unenrollFromStreet = async (fcmToken: string, streetLocation: string): Promise<void> => {
+/** Unenroll from a street on all devices, or only the device matching `fcmToken` when provided. */
+export const unenrollFromStreet = async (
+  userId: number,
+  streetLocation: string,
+  fcmToken?: string,
+): Promise<void> => {
   await prisma.fcmEnrollment.deleteMany({
-    where: { fcmToken, streetLocation },
+    where: fcmToken
+      ? { userId, streetLocation, fcmToken }
+      : { userId, streetLocation },
   });
 };
 
@@ -73,10 +85,9 @@ export const emitNewTicket = async (ticket: Ticket): Promise<void> => {
     return;
   }
 
-  // Find all enrolled tokens for this street
   const enrollments = await prisma.fcmEnrollment.findMany({
     where: { streetLocation: ticket.streetLocation },
-    select: { fcmToken: true },
+    select: { userId: true, fcmToken: true },
   });
 
   if (enrollments.length === 0) return;
@@ -97,15 +108,17 @@ export const emitNewTicket = async (ticket: Ticket): Promise<void> => {
     },
   });
 
-  // Persist a Notification record for each successfully notified token
-  const successfulTokens = response.responses
-    .map((r, i) => (r.success ? tokens[i] ?? null : null))
-    .filter((t): t is string => t !== null);
+  const successfulRows = response.responses
+    .map((r, i) => (r.success ? enrollments[i] : null))
+    .filter((row): row is (typeof enrollments)[number] => row !== null);
 
-  if (successfulTokens.length > 0) {
+  // One history row per user per ticket (not per device)
+  const notifiedUserIds = [...new Set(successfulRows.map((row) => row.userId))];
+
+  if (notifiedUserIds.length > 0) {
     await prisma.notification.createMany({
-      data: successfulTokens.map((fcmToken) => ({
-        fcmToken,
+      data: notifiedUserIds.map((userId) => ({
+        userId,
         title,
         body,
         streetLocation: ticket.streetLocation!,
