@@ -36,5 +36,5 @@ jobs:
             --cap-add=SYS_ADMIN \
             -e DISPLAY=:99 \
             -v ${{ secrets.FIREBASE_SERVICE_ACCOUNT_PATH }}:/app/firebase-service-account.json \
-            -v ${{ secrets.DATABASE_PATH }}:/app/data/sqlite.db \
+            -v ${{ secrets.DATABASE_PATH }}:/app/prisma/data/sqlite.db \
             parkit-backend:latest
