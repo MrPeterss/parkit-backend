@@ -2,7 +2,8 @@ import express from 'express';
 
 import { prisma } from '../prisma.js';
 import { getAreaOverview, getStreetInsights } from '../services/ticketInsightsService.js';
-import { NotFoundError } from '../utils/AppError.js';
+import { BadRequestError, NotFoundError } from '../utils/AppError.js';
+import { isValidIanaTimeZone } from '../utils/timezone.js';
 
 const router = express.Router();
 
@@ -24,7 +25,16 @@ router.get('/street/:streetName/insights', async (req, res, next) => {
       return res.status(400).json({ error: 'Street name is required' });
     }
 
-    const insights = await getStreetInsights(streetName);
+    const tzRaw = req.query['tz'];
+    const timeZone =
+      typeof tzRaw === 'string' && tzRaw.trim() !== '' ? tzRaw.trim() : 'UTC';
+    if (!isValidIanaTimeZone(timeZone)) {
+      throw new BadRequestError(
+        'Invalid tz: must be a valid IANA time zone name (e.g. America/New_York).',
+      );
+    }
+
+    const insights = await getStreetInsights(streetName, { timeZone });
     if (!insights) {
       throw new NotFoundError('No tickets found for this street');
     }
