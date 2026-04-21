@@ -9,8 +9,31 @@ import { prisma } from '../prisma.js';
 import { extractGpsFromImageUrl } from '../services/ocrService.js';
 import { emitNewTicket } from '../services/notificationService.js';
 import { ensureStreetGeometryStored } from '../services/streetGeometryService.js';
-import { BACKOFF_LIST, TicketMessage, TicketSearchResult, type TicketSearchResponse } from '../tickets/types.js';
+import { TicketMessage, TicketSearchResult, type TicketSearchResponse } from '../tickets/types.js';
 import type { Ticket } from '@prisma/client';
+import {
+  formatLike,
+  parseTicketIdOrThrow,
+} from './blockMath.js';
+import {
+  applyAdvanceWithoutHit,
+  applyHit,
+  applyMiss,
+  bootstrapLanes,
+  createLane,
+  discoveryCandidates,
+  frontierBlockStartId,
+  getLastDiscoveryAt,
+  isAtTail,
+  loadLanes,
+  msUntilDue,
+  persistLane,
+  pickNextLane,
+  probeIdsForBlock,
+  setLastDiscoveryAt,
+  shouldRunDiscovery,
+} from './laneManager.js';
+import type { LaneState } from './laneManager.js';
 
 const solver = new Solver(process.env.TWOCAPTCHA_API_KEY ?? '');
 
@@ -53,17 +76,14 @@ const msUntilActiveHours = (): number => {
 
   if (!isWeekend && isWithinHours) return 0;
 
-  // Calculate how many minutes until the next weekday 8:30 AM
   let daysUntilMonday = 0;
   if (weekday === 'Sat') daysUntilMonday = 2;
   else if (weekday === 'Sun') daysUntilMonday = 1;
 
   let minutesUntilStart: number;
   if (daysUntilMonday > 0) {
-    // Weekend: wait until Monday 8:30 AM
     minutesUntilStart = daysUntilMonday * 24 * 60 - totalMinutes + startMinutes;
   } else {
-    // Weekday but outside hours: wait until today or tomorrow 8:30 AM
     minutesUntilStart = totalMinutes < startMinutes
       ? startMinutes - totalMinutes
       : 24 * 60 - totalMinutes + startMinutes;
@@ -85,53 +105,6 @@ const waitForActiveHours = async (): Promise<void> => {
   console.log('⏰ Resuming scraper...');
 };
 
-const incrementTicketId = (ticketId: string): string => {
-  // Try to match pattern with optional prefix (letters) and numeric part
-  const match = /^([a-zA-Z]*)(\d+)$/.exec(ticketId);
-  if (!match) {
-    // Fallback: if format is unexpected, just append '1'
-    console.warn(`⚠️  Unexpected ticket ID format: ${ticketId}`);
-    return `${ticketId}1`;
-  }
-
-  const prefix = match[1];
-  const numeric = match[2];
-  const width = numeric.length;
-  const nextNum = parseInt(numeric, 10) + 1;
-  const nextNumStr = nextNum.toString().padStart(width, '0');
-  
-  return `${prefix}${nextNumStr}`;
-};
-
-const getNumericPart = (ticketId: string): number => {
-  const match = /(\d+)$/.exec(ticketId);
-  return match ? parseInt(match[1], 10) : 0;
-};
-
-const getStartTicketId = async (): Promise<string> => {
-  const envDefault = process.env.DEFAULT_START_TICKET_ID;
-
-  const highestTicket = await prisma.ticket.findFirst({
-    orderBy: { ticketId: 'desc' },
-    select: { ticketId: true },
-  });
-
-  const candidates: string[] = [];
-  if (envDefault) candidates.push(envDefault);
-  if (highestTicket) candidates.push(highestTicket.ticketId);
-
-  if (candidates.length === 0) {
-    throw new Error('No DEFAULT_START_TICKET_ID env var set and no tickets in the database.');
-  }
-
-  const best = candidates.reduce((a, b) =>
-    getNumericPart(a) >= getNumericPart(b) ? a : b
-  );
-
-  console.log(`🎯 Starting from ticket ID: ${best} (env=${envDefault ?? 'unset'}, db=${highestTicket?.ticketId ?? 'none'})`);
-  return best;
-};
-
 const updateScraperState = async (params: {
   lastCheckedId?: string;
   status?: string;
@@ -146,56 +119,39 @@ const updateScraperState = async (params: {
 };
 
 const submitTicketSearch = async (page: Page, ticketId: string) => {
-  // Wait for 1 second
   await sleep(1000);
-  // Use the correct input ID
   const inputSelector = '#ticket-number-search';
 
-  // click the back button, button with aria-label "Back", if it exists
   if (await page.isVisible('button[aria-label="Back"]')) {
     await page.click('button[aria-label="Back"]');
   }
-  
-  // Wait for input to be visible and enabled
-  await page.waitForSelector(inputSelector, { 
+
+  await page.waitForSelector(inputSelector, {
     timeout: 5000,
-    state: 'visible' 
+    state: 'visible'
   });
-  
-  // Click to focus the input first
+
   await page.click(inputSelector);
-  
-  // Clear any existing value
   await page.fill(inputSelector, '');
-  
-  // Type the ticket ID with a small delay between keystrokes
   await page.type(inputSelector, ticketId, { delay: 50 });
-  
-  // Wait a moment for any JavaScript handlers
   await sleep(500);
 
-  // Find and click the search button
   const searchButtonSelector =
     'button[type="submit"], button:has-text("Search"), button:has-text("Lookup")';
 
   await page.click(searchButtonSelector);
-  
-  // Wait for loading spinner to disappear
+
   await page.waitForSelector('div.loading-spinner-text', { state: 'hidden' });
-  
-  // Wait for either search messages or ticket card to appear
+
   console.log('⏳ Waiting for search results...');
   try {
     await Promise.race([
-      // Wait for captcha to appear
       page.waitForSelector('#ticket-search-captcha', { timeout: 10000 }).then(() => {
         console.log('🔍 CAPTCHA element appeared');
       }),
-      // Wait for search messages to have content
       page.waitForSelector('div#ticket-search-messages > div.alert', { timeout: 10000 }).then(() => {
         console.log('🔍 Search messages alert appeared');
       }),
-      // Wait for ticket card to appear
       page.waitForSelector(`div#ticket-results > div.result-container`, { timeout: 10000 }).then(() => {
         console.log('🔍 Ticket card appeared');
       }),
@@ -204,8 +160,7 @@ const submitTicketSearch = async (page: Page, ticketId: string) => {
   } catch (error) {
     console.log('⚠️  Timeout waiting for results, continuing anyway...');
   }
-  
-  // Small buffer for any final rendering
+
   await sleep(500);
 };
 
@@ -222,9 +177,6 @@ const parseEasternTimestamp = (text: string): Date => {
   if (ampm.toUpperCase() === 'PM' && h !== 12) h += 12;
   else if (ampm.toUpperCase() === 'AM' && h === 12) h = 0;
 
-  // Probe the ET offset by treating the wall-clock value as UTC. This is close
-  // enough (~4-5 hours off) to correctly resolve the DST offset for all times
-  // during parking enforcement hours (8:30–17:30 ET).
   const probe = new Date(Date.UTC(+yr, +mo - 1, +da, h, +mi));
   const offsetStr =
     new Intl.DateTimeFormat('en-US', {
@@ -234,7 +186,6 @@ const parseEasternTimestamp = (text: string): Date => {
       .formatToParts(probe)
       .find((p) => p.type === 'timeZoneName')?.value ?? 'GMT-5';
 
-  // offsetStr is like "GMT-5" or "GMT-4"
   const offsetHours = parseInt(offsetStr.replace('GMT', ''), 10);
   const pad = (n: number) => String(n).padStart(2, '0');
   const sign = offsetHours >= 0 ? '+' : '-';
@@ -243,37 +194,29 @@ const parseEasternTimestamp = (text: string): Date => {
 };
 
 const getTicketDetails = async (ticketId: string, page: Page): Promise<Ticket | null> => {
-  // wait for card to appear
   const card = await page.$(`div.card.ticket-card[data-citationnumber='${ticketId}']`);
   if (!card) return null;
 
-  // find div with "card-header" class and only button element inside that
   const cardHeader = await card.$('div.card-header button');
   console.log("card header is there?", cardHeader != null ? "yes" : "no");
   if (!cardHeader) return null;
-  
-  // third element is span with the timestamp inside
+
   const timestamp = await cardHeader.$('span:nth-child(3)')
   const timestampText = await timestamp?.textContent();
-  // is in format "12/15/2025 10:38 AM" — Eastern time, convert to UTC
   const timestampDate = parseEasternTimestamp(timestampText ?? '');
 
   const ticketCardInfo = await card.$('div.ticket-card-info')
 
-  // find liscence plate number
   const licensePlate = await ticketCardInfo?.$('span#LicenseNoState')
   const licensePlateText = (await licensePlate?.textContent())?.trim();
 
-  // find license plate state
   const licensePlateState = await ticketCardInfo?.$('span#LicenseState')
   const licensePlateStateText = (await licensePlateState?.textContent())?.trim();
 
-  // figure out the lat and lng from the license image (first child of div with class carousel-inner)
   const evidenceImage = await card.$('div.carousel-inner > div:first-child > img');
   const evidenceUrl = await evidenceImage?.getAttribute('src');
   const ocrResult = await extractGpsFromImageUrl(evidenceUrl ?? null);
 
-  // Find backup location, from span with id ViolationLocation
   const streetLocation = await card.$('span#ViolationLocation')
   const streetLocationText = await streetLocation?.textContent();
 
@@ -384,7 +327,6 @@ const solveCaptcha = async (page: Page): Promise<boolean> => {
       }
     }, solution.data);
 
-    // Results appear automatically after validateCaptcha — wait for them
     try {
       await Promise.race([
         page.waitForSelector('div#ticket-search-messages > div.alert', { timeout: 10000 }),
@@ -463,104 +405,267 @@ const createPage = async (): Promise<{ browser: Awaited<ReturnType<typeof chromi
   return { browser, page };
 };
 
+// ===========================================================================
+// Lane-aware scheduling
+// ===========================================================================
+
+/**
+ * Persists a found ticket (if new), emits notifications, kicks off side-effects.
+ * Returns the DB row (existing or created).
+ */
+const saveFoundTicket = async (foundTicket: Ticket): Promise<Ticket> => {
+  const existing = await prisma.ticket.findUnique({ where: { ticketId: foundTicket.ticketId } });
+  let ticket: Ticket;
+  if (existing) {
+    console.log(`ℹ️  Ticket ${foundTicket.ticketId} already exists, skipping creation`);
+    ticket = existing;
+  } else {
+    console.log('💾 Saving to database...');
+    ticket = await prisma.ticket.create({ data: foundTicket });
+    console.log(`✅ Saved ticket: ${ticket.ticketId}`);
+  }
+
+  if (foundTicket.streetLocation) {
+    void ensureStreetGeometryStored(foundTicket.streetLocation);
+  }
+
+  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+  if (ticket.timestamp >= tenMinutesAgo) {
+    void emitNewTicket(ticket);
+  } else {
+    console.log(`⏱️  Ticket is older than 10 minutes, skipping notification`);
+  }
+
+  return ticket;
+};
+
+/**
+ * Poll a single lane once. Performs the primary search, neighbor probes if
+ * the primary missed, and updates the lane state accordingly.
+ */
+const pollLane = async (lane: LaneState, page: Page): Promise<void> => {
+  const primaryId = lane.nextCursorId;
+  console.log(
+    `\n🔍 [block ${lane.blockStartId}] checking ${primaryId} ` +
+    `(miss=${lane.missStreak}, cadenceLvl=${lane.cadenceLevel}, tail=${isAtTail(lane)})`,
+  );
+  await updateScraperState({
+    status: `checking ${primaryId}`,
+    lastCheckedId: primaryId,
+  });
+
+  let searchResponse = await searchForTicket(page, primaryId);
+  let resolvedId = primaryId;
+
+  // Neighbor probe within the block (not across blocks!) to absorb transient
+  // portal misses. We probe +1 and +2 if the primary cursor returns NO_RESULTS.
+  if (searchResponse.result === TicketSearchResult.NO_RESULTS) {
+    const { numeric: startNum } = parseTicketIdOrThrow(lane.nextCursorId);
+    const { numeric: blockEndNum } = parseTicketIdOrThrow(lane.blockEndId);
+
+    for (let step = 1; step <= 2; step++) {
+      const probeNumeric = startNum + step;
+      if (probeNumeric > blockEndNum) break; // do not bleed across blocks
+      const probeId = formatLike(lane.blockStartId, probeNumeric);
+      console.log(`🔁 NO_RESULTS for ${primaryId} — probing neighbor ${probeId} (${step}/2)`);
+      const alt = await searchForTicket(page, probeId);
+      if (alt.result !== TicketSearchResult.NO_RESULTS) {
+        searchResponse = alt;
+        resolvedId = probeId;
+        break;
+      }
+    }
+  }
+
+  const now = new Date();
+
+  switch (searchResponse.result) {
+    case TicketSearchResult.ACCESSIBLE: {
+      const foundTicket = searchResponse.ticket;
+      if (!foundTicket) {
+        // Shouldn't happen, but treat as miss.
+        applyMiss(lane, now);
+        break;
+      }
+      await saveFoundTicket(foundTicket);
+      const { blockComplete } = applyHit(lane, foundTicket.ticketId, now);
+      if (blockComplete) {
+        console.log(`🏁 Block ${lane.blockStartId} completed at ${foundTicket.ticketId}`);
+      } else {
+        console.log(`➡️  Next in block ${lane.blockStartId}: ${lane.nextCursorId}`);
+      }
+      break;
+    }
+
+    case TicketSearchResult.CLOSED: {
+      // The slot exists but is closed — advance without persisting a ticket.
+      console.log(`🔒 Ticket ${resolvedId} is CLOSED — advancing cursor`);
+      applyAdvanceWithoutHit(lane, resolvedId, now);
+      break;
+    }
+
+    case TicketSearchResult.NO_RESULTS: {
+      const decay = applyMiss(lane, now);
+      if (decay.retired) {
+        console.log(`🪦 Retiring lane ${lane.blockStartId} (reason=${decay.reason})`);
+      } else {
+        console.log(
+          `📉 Miss on ${primaryId} — cadenceLvl now ${lane.cadenceLevel}, ` +
+          `next due in ${Math.round((lane.nextDueAt.getTime() - now.getTime()) / 1000)}s`,
+        );
+      }
+      break;
+    }
+
+    default: {
+      // CAPTCHA / FAILED_CHALLENGE are handled inside searchForTicket; any
+      // other unexpected state: treat as a soft miss.
+      applyMiss(lane, now);
+      break;
+    }
+  }
+
+  await persistLane(lane);
+  await updateScraperState({ status: 'ok' });
+};
+
+/**
+ * Sweep candidate blocks for new lanes. Probes the first few IDs of each
+ * candidate; the first block to yield a non-empty result becomes a new lane.
+ */
+const runDiscovery = async (
+  lanes: Map<string, LaneState>,
+  page: Page,
+): Promise<void> => {
+  const candidates = discoveryCandidates(lanes);
+  if (candidates.length === 0) {
+    console.log('🧭 Discovery: no candidates.');
+    await setLastDiscoveryAt(new Date());
+    return;
+  }
+
+  console.log(
+    `🧭 Discovery sweep: frontier=${frontierBlockStartId(lanes)}, ` +
+    `candidates=[${candidates.join(', ')}]`,
+  );
+  await updateScraperState({ status: 'discovering' });
+
+  for (const candidateBlockStartId of candidates) {
+    const probeIds = probeIdsForBlock(candidateBlockStartId);
+
+    let firstHitId: string | null = null;
+    let firstHitTicket: Ticket | null = null;
+
+    for (const probeId of probeIds) {
+      console.log(`🧪 Probe ${probeId} (candidate block ${candidateBlockStartId})`);
+      await updateScraperState({ status: `probing ${probeId}`, lastCheckedId: probeId });
+
+      const resp = await searchForTicket(page, probeId);
+
+      if (resp.result === TicketSearchResult.ACCESSIBLE && resp.ticket) {
+        firstHitId = probeId;
+        firstHitTicket = resp.ticket;
+        break;
+      }
+      if (resp.result === TicketSearchResult.CLOSED) {
+        // The block is live even if this particular ID is closed.
+        firstHitId = probeId;
+        break;
+      }
+      // NO_RESULTS / CAPTCHA-resolved-but-empty → keep probing within block
+    }
+
+    if (firstHitId) {
+      // Promote candidate to a real lane.
+      const hitNumeric = parseTicketIdOrThrow(firstHitId).numeric;
+      const nextCursorId = formatLike(candidateBlockStartId, hitNumeric + 1);
+
+      const lane = createLane(candidateBlockStartId, nextCursorId);
+      if (firstHitTicket) {
+        await saveFoundTicket(firstHitTicket);
+        lane.lastFoundId = firstHitTicket.ticketId;
+        lane.lastFoundAt = new Date();
+      }
+      await persistLane(lane);
+      lanes.set(lane.blockStartId, lane);
+
+      console.log(
+        `✨ New lane discovered: ${candidateBlockStartId} (first hit ${firstHitId}, cursor=${nextCursorId})`,
+      );
+      // Stop after discovering one new lane per sweep so we don't burn too
+      // many requests speculating — the next sweep will find the next one.
+      break;
+    }
+
+    console.log(`💤 No activity in candidate block ${candidateBlockStartId}`);
+  }
+
+  await setLastDiscoveryAt(new Date());
+};
+
 export const startTicketWatcher = async (): Promise<void> => {
-  let currentTicketId = await getStartTicketId();
+  await bootstrapLanes();
+  const lanes = await loadLanes();
+  console.log(`🎯 Loaded ${lanes.size} lane(s): ${[...lanes.keys()].join(', ')}`);
+
   let { browser, page } = await createPage();
+
+  // Prevent a restart-flood: clamp any lane whose nextDueAt is far in the past
+  // so we don't fire every lane simultaneously right after boot.
+  const bootTime = Date.now();
+  for (const lane of lanes.values()) {
+    if (lane.status === 'active' && lane.nextDueAt.getTime() < bootTime) {
+      lane.nextDueAt = new Date(bootTime);
+    }
+  }
 
   while (true) {
     try {
       await waitForActiveHours();
 
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 5000 });
-
-      console.log(`\n🔍 Checking ticket: ${currentTicketId}`);
-      await updateScraperState({ status: `checking ${currentTicketId}` });
-
-      let backoffNode = BACKOFF_LIST;
-      let foundTicket: Ticket | null = null;
-
-      while (true) {
-        await waitForActiveHours();
-
-        let searchResponse = await searchForTicket(page, currentTicketId);
-        console.log('SEARCH RESPONSE:', searchResponse);
-
-        // Transient portal misses: if N returns NO_RESULTS, try N+1 and N+2 before backing off.
-        if (searchResponse.result === TicketSearchResult.NO_RESULTS) {
-          let probeId = currentTicketId;
-          for (let step = 0; step < 2; step++) {
-            probeId = incrementTicketId(probeId);
-            console.log(
-              `🔁 NO_RESULTS for ${currentTicketId} — probing neighbor ${probeId} (${step + 1}/2)`
-            );
-            const altResponse = await searchForTicket(page, probeId);
-            console.log('SEARCH RESPONSE (neighbor probe):', altResponse);
-            if (altResponse.result !== TicketSearchResult.NO_RESULTS) {
-              searchResponse = altResponse;
-              break;
-            }
-          }
-        }
-
-        if (searchResponse.result !== TicketSearchResult.NO_RESULTS) {
-          foundTicket = searchResponse.ticket;
-          break;
-        }
-
-        console.log(`⏳ Waiting for ${backoffNode.backoff}ms...`);
-        await sleep(backoffNode.backoff);
-        if (backoffNode.next != null) {
-          backoffNode = backoffNode.next;
-        }
+      // Periodic discovery sweep
+      const lastDiscoveryAt = await getLastDiscoveryAt();
+      if (shouldRunDiscovery(lastDiscoveryAt)) {
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+        await runDiscovery(lanes, page);
       }
 
-      if (foundTicket == null) {
-        console.log('⚠️  Ticket not accessible, skipping...');
-        await updateScraperState({ status: 'no_results' });
-        await sleep(2000);
-        currentTicketId = incrementTicketId(currentTicketId);
+      const lane = pickNextLane(lanes);
+      if (!lane) {
+        console.log('⚠️  No active lanes — running discovery and waiting...');
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+        await runDiscovery(lanes, page);
+        // If still nothing, sleep until the next discovery interval.
+        if (pickNextLane(lanes) == null) {
+          await sleep(Math.min(60_000, Math.max(10_000, 30_000)));
+          continue;
+        }
         continue;
       }
 
-      let ticket = await prisma.ticket.findUnique({ where: { ticketId: foundTicket.ticketId } });
-
-      if (ticket) {
-        console.log(`ℹ️  Ticket ${foundTicket.ticketId} already exists, skipping creation`);
-      } else {
-        console.log('💾 Saving to database...');
-        ticket = await prisma.ticket.create({ data: foundTicket });
-        console.log(`✅ Saved ticket: ${ticket.ticketId}`);
+      const waitMs = msUntilDue(lane);
+      if (waitMs > 0) {
+        // Sleep in chunks so we can re-check active hours & discovery regularly.
+        const chunk = Math.min(waitMs, 30_000);
+        await sleep(chunk);
+        continue;
       }
 
-      await updateScraperState({ lastCheckedId: foundTicket.ticketId, status: 'ok' });
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+      await pollLane(lane, page);
 
-      if (foundTicket.streetLocation) {
-        void ensureStreetGeometryStored(foundTicket.streetLocation);
-      }
-
-      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-      if (ticket.timestamp >= tenMinutesAgo) {
-        void emitNewTicket(ticket);
-      } else {
-        console.log(`⏱️  Ticket is older than 10 minutes, skipping notification`);
-      }
-
-      currentTicketId = incrementTicketId(foundTicket.ticketId);
-      console.log(`➡️  Next ticket: ${currentTicketId}\n`);
+      // Small inter-poll buffer — politeness.
       await sleep(2000);
-
     } catch (err) {
       if (err instanceof CaptchaExhaustedError) {
         console.warn('🔄 CAPTCHA exhausted — waiting 1 minute then restarting browser...');
         await updateScraperState({ status: 'captcha_backoff' });
-        await sleep(60000);
+        await sleep(60_000);
 
         console.log('🔒 Closing old browser...');
         await browser.close().catch(() => {});
 
         ({ browser, page } = await createPage());
-        console.log(`↩️  Retrying ticket: ${currentTicketId}`);
-        // Do NOT increment currentTicketId — retry the same ticket
       } else {
         console.error('Error in ticket watcher loop:', err);
         await updateScraperState({ status: 'error' });
@@ -569,5 +674,3 @@ export const startTicketWatcher = async (): Promise<void> => {
     }
   }
 };
-
-

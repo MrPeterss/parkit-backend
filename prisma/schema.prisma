@@ -58,9 +58,39 @@ model StreetGeometry {
 }
 
 model ScraperState {
-  id            Int    @id @default(1)
-  lastCheckedId String
-  status        String
+  id               Int       @id @default(1)
+  lastCheckedId    String
+  status           String
+  lastDiscoveryAt  DateTime?
+}
+
+/// One row per block of 500 ticket IDs being actively (or recently) scraped.
+/// Each lane tracks the next ID to probe, decay cadence, and lifecycle state.
+model ScraperLane {
+  /// Full ticket ID of the first ticket in the block, e.g. "100000064501".
+  blockStartId    String   @id
+  /// Full ticket ID of the last ticket in the block (blockStart + 499).
+  blockEndId      String
+  /// Next ticket ID to probe within this lane.
+  nextCursorId    String
+  /// Most recently found ticket ID in this lane.
+  lastFoundId     String?
+  /// Timestamp of the most recent successful find in this lane.
+  lastFoundAt     DateTime?
+  /// Consecutive confirmed misses (neighbor-probe already applied) since last hit.
+  missStreak      Int      @default(0)
+  /// Index into the cadence-levels array controlling poll frequency.
+  cadenceLevel    Int      @default(0)
+  /// Earliest wall-clock time this lane is eligible to be polled again.
+  nextDueAt       DateTime @default(now())
+  /// One of: "active" | "retired".
+  status          String   @default("active")
+  retiredAt       DateTime?
+  retiredReason   String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status, nextDueAt])
 }
 
 /// One row per user per street per device (FCM token); multiple devices = multiple rows.
